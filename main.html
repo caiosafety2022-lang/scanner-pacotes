@@ -1,0 +1,336 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Escáner de Paquetes</title>
+  <!-- PapaParse CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <!-- Quagga2 CDN -->
+  <script src="https://unpkg.com/@ericblade/quagga2@1.2.6/dist/quagga.min.js"></script>
+  <!-- Estilos -->
+  <style>
+html, body { height: 100%; overflow: hidden; }
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background-color: #121212;
+      color: #eee;
+    }
+    h1, h2 {
+      color: #fff;
+    }
+    .container {
+      max-width: 900px;
+      margin: auto;
+      padding: 1rem;
+    }
+    input[type="file"], input[type="text"] {
+      background: #222;
+      color: #eee;
+      border: 1px solid #555;
+      padding: 0.5rem;
+      width: 100%;
+      margin: 0.5rem 0;
+    }
+    button {
+      background: #333;
+      color: #eee;
+      border: 1px solid #555;
+      padding: 0.5rem 1rem;
+      margin: 0.3rem;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #444;
+    }
+    label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.3rem;
+    }
+    .preview, .status, .history, .controls, .counter {
+      margin-top: 1rem;
+      padding: 1rem;
+      background: #1e1e1e;
+      border-radius: 8px;
+    }
+    .status.ok {
+      border-left: 5px solid #4caf50;
+    }
+    .status.error {
+      border-left: 5px solid #f44336;
+    }
+    video {
+      width: 100%;
+      border: 2px solid #555;
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      margin-top: 0.5rem;
+      border-collapse: collapse;
+    }
+    th, td {
+      padding: 0.4rem;
+      border-bottom: 1px solid #555;
+    }
+    .toast {
+      position: fixed;
+      bottom: 1rem;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #333;
+      color: white;
+      padding: 1rem;
+      border-radius: 6px;
+      display: none;
+      z-index: 1000;
+    }
+    .toast.ok {
+      background: #4caf50;
+    }
+    .toast.error {
+      background: #f44336;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+<!-- Upload CSV -->
+<input type="file" id="csvFile" accept=".csv">
+
+    <h1>Escáner de Paquetes</h1>
+
+    <!-- Upload CSV -->
+    
+    
+
+    <!-- Camera Controls -->
+    <div class="controls">
+      <button onclick="startCamera()">Iniciar Cámara</button>
+      <button onclick="stopCamera()">Detener Cámara</button>
+      
+      
+      <label><input type="checkbox" id="beepToggle" checked> Pitido</label>
+      <label><input type="checkbox" id="vibrateToggle" checked> Vibrar</label>
+      
+    </div>
+
+    <!-- Video -->
+    <video id="video" autoplay muted playsinline style="width: 100%; height: auto; aspect-ratio: 16/9; border-radius: 8px;"></video>
+
+    <!-- Manual Search -->
+    
+
+    <!-- Counter -->
+    <div class="counter">Leídos: <span id="readCounter">0</span></div>
+
+    <!-- History -->
+    <div class="history">
+      <h2>Historial reciente</h2>
+      <table>
+        <thead>
+          <tr><th>Hora</th><th>Código</th><th>Ruta</th><th>Status</th></tr>
+        </thead>
+        <tbody id="historyTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <!-- Sons -->
+  <audio id="beepSound" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
+
+  <!-- Scripts -->
+  <script>
+    let map = new Map();
+    let history = [];
+    let lastScanned = {};
+    let readCount = 0;
+    let scannerActive = false;
+    let useBarcodeDetector = false;
+    let stream = null;
+
+    const video = document.getElementById('video');
+    const toast = document.getElementById('toast');
+    const statusPanel = document.getElementById('statusPanel');
+    const readCounter = document.getElementById('readCounter');
+    const historyTable = document.getElementById('historyTable');
+    const beepSound = document.getElementById('beepSound');
+
+    document.getElementById('manualInput').addEventListener('keypress', e => {
+      if (e.key === 'Enter') handleCode(e.target.value.trim());
+    });
+
+    document.getElementById('csvFile').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      Papa.parse(file, {
+        header: false,
+        skipEmptyLines: true,
+        complete: res => {
+          const data = res.data;
+          const preview = data.slice(0, 5).map(r => r.join(' → ')).join('<br>');
+          document.getElementById('dataPreview').innerHTML = 'Ejemplo:<br>' + preview + '<br>Total: ' + data.length;
+          map.clear();
+          data.forEach(row => {
+            if (row.length < 2) return;
+            const key = row[0].trim();
+            const value = row[1].trim();
+            if (key.toLowerCase() !== 'id' && value.toLowerCase() !== 'rota') {
+              map.set(key, value);
+            }
+          });
+          if (document.getElementById('cacheToggle').checked) {
+            localStorage.setItem('mapCache', JSON.stringify([...map]));
+          }
+        }
+      });
+    });
+
+    if (localStorage.getItem('mapCache')) {
+      const cached = new Map(JSON.parse(localStorage.getItem('mapCache')));
+      map = cached;
+      document.getElementById('dataPreview').innerHTML = 'Mapa cargado desde caché. Total: ' + map.size;
+    }
+
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        });
+        video.srcObject = stream;
+        scannerActive = true;
+        if ('BarcodeDetector' in window) {
+          const formats = ['code_128', 'code_39', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'itf', 'codabar', 'qr_code'];
+          const detector = new BarcodeDetector({ formats });
+          useBarcodeDetector = true;
+          scanWithBarcodeDetector(detector);
+        } else {
+          useBarcodeDetector = false;
+          startQuagga();
+        }
+      } catch (err) {
+        alert("Error al iniciar cámara: " + err.name + ". Verifique permisos (candado).");
+      }
+    }
+
+    function stopCamera() {
+      scannerActive = false;
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        video.srcObject = null;
+      }
+      if (!useBarcodeDetector) {
+        Quagga.stop();
+      }
+    }
+
+    async function scanWithBarcodeDetector(detector) {
+      if (!scannerActive) return;
+      try {
+        const barcodes = await detector.detect(video);
+        barcodes.forEach(barcode => handleCode(barcode.rawValue.trim()));
+      } catch (e) {}
+      requestAnimationFrame(() => scanWithBarcodeDetector(detector));
+    }
+
+    function startQuagga() {
+      Quagga.init({
+        inputStream: {
+          type: "LiveStream",
+          target: video,
+          constraints: {
+            facingMode: "environment"
+          }
+        },
+        decoder: {
+          readers: [
+            "code_128_reader",
+            "code_39_reader",
+            "ean_reader",
+            "ean_8_reader",
+            "upc_reader",
+            "upc_e_reader",
+            "itf_reader",
+            "codabar_reader"
+          ]
+        },
+        locate: true,
+        numOfWorkers: navigator.hardwareConcurrency || 4
+      }, err => {
+        if (err) {
+          alert("Erro ao iniciar Quagga: " + err);
+          return;
+        }
+        Quagga.start();
+        Quagga.onDetected(result => {
+          const code = result.codeResult.code.trim();
+          handleCode(code);
+        });
+      });
+    }
+
+    function handleCode(code) {
+      const allowRepeat = document.getElementById('repeatToggle').checked;
+      const now = Date.now();
+      if (!allowRepeat && lastScanned[code] && now - lastScanned[code] < 1200) return;
+      lastScanned[code] = now;
+      const rota = map.get(code);
+      if (rota) {
+        showStatus("Ruta: " + rota, true);
+        playFeedback(true, code, rota);
+        addToHistory(code, rota, true);
+      } else {
+        showStatus("Código no encontrado", false);
+        playFeedback(false, code, null);
+        addToHistory(code, null, false);
+      }
+    }
+
+    function showStatus(msg, ok) {
+      statusPanel.className = "status " + (ok ? "ok" : "error");
+      statusPanel.textContent = msg;
+    }
+
+    function playFeedback(ok, code, rota) {
+      if (document.getElementById('beepToggle').checked && ok) beepSound.play();
+      if (document.getElementById('vibrateToggle').checked && navigator.vibrate) navigator.vibrate(60);
+      if (document.getElementById('ttsToggle').checked && rota) {
+        const utter = new SpeechSynthesisUtterance("Ruta " + rota);
+        utter.lang = "es";
+        speechSynthesis.speak(utter);
+      }
+      showToast(ok, code, rota);
+    }
+
+    function showToast(ok, code, rota) {
+      toast.className = "toast " + (ok ? "ok" : "error");
+      toast.textContent = ok ? "✔ Paquete " + code + " → " + rota : "✖ " + code + " no encontrado";
+      toast.style.display = "block";
+      setTimeout(() => toast.style.display = "none", 2000);
+    }
+
+    function addToHistory(code, rota, ok) {
+      const now = new Date().toLocaleTimeString();
+      history.unshift({ time: now, code, rota, ok });
+      history = history.slice(0, 15);
+      updateHistoryUI();
+      readCount++;
+      readCounter.textContent = readCount;
+    }
+
+    function updateHistoryUI() {
+      historyTable.innerHTML = history.map(h =>
+        `<tr><td>${h.time}</td><td>${h.code}</td><td>${h.rota || '-'}</td><td>${h.ok ? 'OK' : 'ERROR'}</td></tr>`
+      ).join('');
+    }
+  </script>
+</body>
+</html>
